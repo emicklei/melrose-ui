@@ -9,12 +9,8 @@ import (
 	"go.hasen.dev/shirei/widgets"
 )
 
-type Config struct {
-	FlashDuration time.Duration
-}
-
-type MelroseEditor struct {
-	Config   Config
+type Editor struct {
+	Config   *Config
 	Text     string
 	Bindings map[shirei.KeyCombo]func(string, widgets.TextInputState)
 
@@ -28,35 +24,51 @@ type MelroseEditor struct {
 	}
 }
 
-func NewMelroseEditor(text string, config Config) *MelroseEditor {
-	editor := &MelroseEditor{Text: text, Config: config, markedLines: map[int]bool{}}
+func NewEditor(text string, config *Config) *Editor {
+	if config == nil {
+		config = &Config{}
+	}
+	editor := &Editor{Text: text, Config: config, markedLines: map[int]bool{}}
 	editor.Bindings = map[shirei.KeyCombo]func(string, widgets.TextInputState){
+		shirei.Combo(shirei.Key2, shirei.ModCmd): editor.handleInspect,
+		shirei.Combo(shirei.KeyE, shirei.ModCmd): editor.handleEvaluate,
 		shirei.Combo(shirei.Key3, shirei.ModCmd): editor.printSelection,
-		shirei.Combo(shirei.Key4, shirei.ModCmd): editor.markLine,
+		shirei.Combo(shirei.Key4, shirei.ModCmd): editor.handleKill,
+		shirei.Combo(shirei.KeyK, shirei.ModCmd): editor.handleKill,
 	}
 	return editor
 }
 
-func (editor *MelroseEditor) DrawRoot() {
-	shirei.Container(shirei.Attrs(shirei.Viewport, shirei.Pad(20), shirei.Gap(12), shirei.Background(0, 0, 97, 1)), func() {
-		shirei.Label("Melrose", shirei.FontSize(22), shirei.FontWeight(shirei.WeightBold))
-		editor.Draw()
-	})
+func (editor *Editor) handleInspect(document string, state widgets.TextInputState) {
+	logSelection(document, state)
 }
 
-func (editor *MelroseEditor) printSelection(document string, state widgets.TextInputState) {
-	lineNumber, content := editorSelection(document, state)
-	fmt.Printf("Line %d: %s\n", lineNumber, content)
+func (editor *Editor) handleEvaluate(document string, state widgets.TextInputState) {
+	logSelection(document, state)
+}
+
+func (editor *Editor) handleKill(document string, state widgets.TextInputState) {
+	logSelection(document, state)
+}
+
+func (editor *Editor) printSelection(document string, state widgets.TextInputState) {
+	logSelection(document, state)
 	editor.flash.document = document
 	editor.flash.start, editor.flash.end = editorRange(document, state)
 	editor.flash.top = state.CaretPos[1]
-	editor.flash.until = time.Now().Add(editor.Config.FlashDuration)
+	editor.flash.until = time.Now().Add(editor.Config.EditorFlashDuration)
 }
 
-func (editor *MelroseEditor) markLine(document string, state widgets.TextInputState) {
+func (editor *Editor) markLine(document string, state widgets.TextInputState) {
+	logSelection(document, state)
 	state.Anchor = state.Cursor
 	lineNumber, _ := editorSelection(document, state)
 	editor.markedLines[lineNumber] = true
+}
+
+func logSelection(document string, state widgets.TextInputState) {
+	lineNumber, content := editorSelection(document, state)
+	fmt.Printf("Line %d: %s\n", lineNumber, content)
 }
 
 func editorSelection(document string, state widgets.TextInputState) (int, string) {
@@ -82,7 +94,7 @@ func editorRange(document string, state widgets.TextInputState) (int, int) {
 	return start, end
 }
 
-func (editor *MelroseEditor) Draw() {
+func (editor *Editor) Draw() {
 	shirei.ContainerWithKey(editor, shirei.Attrs(shirei.Expand, shirei.Grow(1)), func() {
 		style := widgets.CurrentColorScheme.TextInput
 		lineCount := strings.Count(editor.Text, "\n") + 1
@@ -144,7 +156,7 @@ func (editor *MelroseEditor) Draw() {
 	})
 }
 
-func (editor *MelroseEditor) drawLineNumbers(document string, cfg widgets.TextInputConfig, gutterWidth float32) {
+func (editor *Editor) drawLineNumbers(document string, cfg widgets.TextInputConfig, gutterWidth float32) {
 	scale := shirei.ComfortScale()
 	fontSize := cfg.FontSize * scale
 	style := shirei.DefaultTextStyle()

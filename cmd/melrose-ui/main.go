@@ -15,18 +15,25 @@ import (
 const windowWidth, windowHeight = 900, 640
 
 func main() {
-	mainEditor := ui.NewMelroseEditor("Untitled\n\nStart writing here.", ui.Config{
-		FlashDuration: 200 * time.Millisecond,
-	})
+	config := &ui.Config{
+		VariableListWidthPercentage: 25,
+		EditorHeightPercentage:      75,
+		EditorFlashDuration:         200 * time.Millisecond,
+	}
+	mainWindow := &ui.Window{
+		Config: config,
+		Label:  "Melrose",
+		Editor: ui.NewEditor("Untitled\n\nStart writing here.", config),
+	}
 	snapshot := flag.String("png", "", "render a window snapshot to a PNG and exit")
 	flag.Parse()
 	if *snapshot != "" {
-		if err := shirei.RenderToPNG(*snapshot, windowWidth, windowHeight, mainEditor.DrawRoot); err != nil {
+		if err := shirei.RenderToPNG(*snapshot, windowWidth, windowHeight, mainWindow.Draw); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
 	}
 	app.SetupWindow("Melrose - Editor", windowWidth, windowHeight)
-	app.Run(mainEditor.DrawRoot)
+	app.Run(mainWindow.Draw)
 }

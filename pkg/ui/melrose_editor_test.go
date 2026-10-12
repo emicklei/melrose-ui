@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"fmt"
+	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -10,12 +13,151 @@ import (
 
 const windowWidth, windowHeight = 900, 640
 
-var mainEditor = NewMelroseEditor("Untitled\n\nStart writing here.", Config{
-	FlashDuration: 200 * time.Millisecond,
+var mainEditor = NewEditor("Untitled\n\nStart writing here.", &Config{
+	EditorFlashDuration: 200 * time.Millisecond,
 })
 
 func rootView() {
-	mainEditor.DrawRoot()
+	window := Window{Label: "Melrose", Editor: mainEditor}
+	window.Draw()
+}
+
+func TestWindowConsoleWorkflow(t *testing.T) {
+	shirei.InitFontSubsystem()
+	shirei.ResetInputSession()
+	t.Cleanup(shirei.ResetInputSession)
+	window := &Window{
+		Label:   "Melrose",
+		Editor:  NewEditor("document", nil),
+		Console: "console output",
+	}
+	scope := new(int)
+	frameView := func() {
+		shirei.ContainerWithKey(scope, shirei.Attrs(shirei.Viewport), window.Draw)
+	}
+	host := shirei.GetHost()
+	host.WindowSize = shirei.Vec2{windowWidth, windowHeight}
+	for frame := 0; frame < 3; frame++ {
+		shirei.RunFrameFn(frameView)
+	}
+	host.Input.Modifiers = shirei.ModNone
+	host.FrameInput = shirei.FrameInputData{Text: "x"}
+	shirei.RunFrameFn(frameView)
+	if window.Console != "console output" {
+		t.Errorf("typing changed console to %q", window.Console)
+	}
+	image := shirei.RenderToImage(windowWidth, windowHeight, frameView)
+	pixelScale := float32(image.Bounds().Dx()) / windowWidth * shirei.ComfortScale()
+	padding := int(20 * pixelScale)
+	bottom := image.Bounds().Dy() - padding
+	top := bottom - 1
+	for top > padding {
+		color := image.RGBAAt(padding+1, top-1)
+		if color.R != 0 || color.G != 0 || color.B != 0 {
+			break
+		}
+		top--
+	}
+	for left := padding + 1; left < image.Bounds().Dx()-padding-1; left++ {
+		color := image.RGBAAt(left, bottom-4)
+		if color.R != 0 || color.G != 0 || color.B != 0 {
+			t.Fatalf("console background at x=%d is %v, want black across the full width", left, color)
+		}
+	}
+	grayPixels := 0
+	for vertical := top + 1; vertical < bottom-1; vertical++ {
+		for horizontal := padding + 1; horizontal < image.Bounds().Dx()-padding-1; horizontal++ {
+			color := image.RGBAAt(horizontal, vertical)
+			if color.R > 150 && color.R == color.G && color.G == color.B {
+				grayPixels++
+			}
+		}
+	}
+	if grayPixels == 0 {
+		t.Error("console did not render light gray text")
+	}
+}
+
+func TestWindowPaneProportionsWorkflow(t *testing.T) {
+	shirei.InitFontSubsystem()
+	t.Cleanup(shirei.ResetInputSession)
+	for _, scenario := range []struct {
+		name   string
+		width  int
+		height int
+		config Config
+	}{
+		{"defaults", 900, 640, Config{}},
+		{"custom", 900, 640, Config{VariableListWidthPercentage: 35, EditorHeightPercentage: 60}},
+		{"smaller window", 600, 480, Config{VariableListWidthPercentage: 35, EditorHeightPercentage: 60}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			shirei.ResetInputSession()
+			window := &Window{
+				Config: &scenario.config,
+				Label:  "Melrose",
+				Editor: NewEditor("document", nil),
+				List:   VariableList{Items: []string{"first item", "second item"}},
+			}
+			scope := new(int)
+			frameView := func() {
+				shirei.ContainerWithKey(scope, shirei.Attrs(shirei.Viewport), window.Draw)
+			}
+			shirei.GetHost().WindowSize = shirei.Vec2{float32(scenario.width), float32(scenario.height)}
+			for frame := 0; frame < 3; frame++ {
+				shirei.RunFrameFn(frameView)
+			}
+			if window.Editor.Config != window.Config {
+				t.Fatal("window and editor do not share one config")
+			}
+			image := shirei.RenderToImage(scenario.width, scenario.height, frameView)
+			scale := float32(image.Bounds().Dx()) / float32(scenario.width) * shirei.ComfortScale()
+			padding, gap := int(20*scale), int(12*scale)
+			right, bottom := image.Bounds().Dx()-padding, image.Bounds().Dy()-padding
+			top, end := -1, -1
+			for vertical := padding; vertical < bottom; vertical++ {
+				color := image.RGBAAt(right-2, vertical)
+				if color.R >= 239 && color.R <= 240 && color.G == color.R && color.B == color.R {
+					if top == -1 {
+						top = vertical
+					}
+					end = vertical + 1
+				}
+			}
+			if top == -1 {
+				t.Fatal("right-hand list is not visible")
+			}
+			left := right - 2
+			for left > padding {
+				color := image.RGBAAt(left-1, (top+end)/2)
+				if color.R < 239 || color.R > 240 || color.G != color.R || color.B != color.R {
+					break
+				}
+				left--
+			}
+			widthPercent, heightPercent := scenario.config.VariableListWidthPercentage, scenario.config.EditorHeightPercentage
+			if widthPercent == 0 {
+				widthPercent = 25
+			}
+			if heightPercent == 0 {
+				heightPercent = 75
+			}
+			wantWidth := int(float32(right-padding-gap) * widthPercent / 100)
+			wantHeight := int(float32(bottom-top-gap) * heightPercent / 100)
+			if difference := right - left - wantWidth; difference < -3 || difference > 3 {
+				t.Errorf("list width = %d pixels, want %d", right-left, wantWidth)
+			}
+			if difference := end - top - wantHeight; difference < -3 || difference > 3 {
+				t.Errorf("pane height = %d pixels, want %d", end-top, wantHeight)
+			}
+			for _, vertical := range []int{top + 4, end - 4} {
+				color := image.RGBAAt(padding+10, vertical)
+				if color.R < 245 || color.G < 245 || color.B < 245 {
+					t.Errorf("editor does not share list height at y=%d: %v", vertical, color)
+				}
+			}
+		})
+	}
 }
 
 func TestEditorKeyboardBindings(t *testing.T) {
@@ -27,22 +169,42 @@ func TestEditorKeyboardBindings(t *testing.T) {
 	})
 	for _, scenario := range []struct {
 		name        string
+		key         shirei.KeyCode
+		input       string
 		modifiers   shirei.Modifiers
 		focused     bool
 		wantHandled int
 		wantText    string
 	}{
-		{"Cmd+3", shirei.ModCmd, true, 1, "text"},
-		{"plain 3", shirei.ModNone, true, 0, "3text"},
-		{"Cmd+Shift+3", shirei.ModCmd | shirei.ModShift, true, 0, "text"},
-		{"unfocused Cmd+3", shirei.ModCmd, false, 0, "text"},
+		{"Cmd+2", shirei.Key2, "2", shirei.ModCmd, true, 1, "text"},
+		{"plain 2", shirei.Key2, "2", shirei.ModNone, true, 0, "2text"},
+		{"Cmd+Shift+2", shirei.Key2, "2", shirei.ModCmd | shirei.ModShift, true, 0, "text"},
+		{"unfocused Cmd+2", shirei.Key2, "2", shirei.ModCmd, false, 0, "text"},
+		{"Cmd+E", shirei.KeyE, "e", shirei.ModCmd, true, 1, "text"},
+		{"plain e", shirei.KeyE, "e", shirei.ModNone, true, 0, "etext"},
+		{"Cmd+Shift+E", shirei.KeyE, "e", shirei.ModCmd | shirei.ModShift, true, 0, "text"},
+		{"unfocused Cmd+E", shirei.KeyE, "e", shirei.ModCmd, false, 0, "text"},
+		{"Cmd+3", shirei.Key3, "3", shirei.ModCmd, true, 1, "text"},
+		{"plain 3", shirei.Key3, "3", shirei.ModNone, true, 0, "3text"},
+		{"Cmd+Shift+3", shirei.Key3, "3", shirei.ModCmd | shirei.ModShift, true, 0, "text"},
+		{"unfocused Cmd+3", shirei.Key3, "3", shirei.ModCmd, false, 0, "text"},
+		{"Cmd+4", shirei.Key4, "4", shirei.ModCmd, true, 1, "text"},
+		{"plain 4", shirei.Key4, "4", shirei.ModNone, true, 0, "4text"},
+		{"Cmd+Shift+4", shirei.Key4, "4", shirei.ModCmd | shirei.ModShift, true, 0, "text"},
+		{"unfocused Cmd+4", shirei.Key4, "4", shirei.ModCmd, false, 0, "text"},
+		{"Cmd+K", shirei.KeyK, "k", shirei.ModCmd, true, 1, "text"},
+		{"plain k", shirei.KeyK, "k", shirei.ModNone, true, 0, "ktext"},
+		{"Cmd+Shift+K", shirei.KeyK, "k", shirei.ModCmd | shirei.ModShift, true, 0, "text"},
+		{"unfocused Cmd+K", shirei.KeyK, "k", shirei.ModCmd, false, 0, "text"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			mainEditor = NewMelroseEditor("text", originalEditor.Config)
+			mainEditor = NewEditor("text", originalEditor.Config)
 			handled := 0
-			mainEditor.Bindings = map[shirei.KeyCombo]func(string, widgets.TextInputState){
-				shirei.Combo(shirei.Key3, shirei.ModCmd): func(string, widgets.TextInputState) { handled++ },
+			combo := shirei.Combo(scenario.key, shirei.ModCmd)
+			if mainEditor.Bindings[combo] == nil {
+				t.Fatal("shortcut is not registered")
 			}
+			mainEditor.Bindings[combo] = func(string, widgets.TextInputState) { handled++ }
 			shirei.ResetInputSession()
 			shirei.GetHost().WindowSize = shirei.Vec2{windowWidth, windowHeight}
 			for frame := 0; frame < 3; frame++ {
@@ -53,9 +215,9 @@ func TestEditorKeyboardBindings(t *testing.T) {
 			}
 			host := shirei.GetHost()
 			host.Input.Modifiers = scenario.modifiers
-			host.FrameInput = shirei.FrameInputData{Key: shirei.Key3}
+			host.FrameInput = shirei.FrameInputData{Key: scenario.key}
 			if scenario.modifiers == shirei.ModNone || scenario.wantHandled != 0 {
-				host.FrameInput.Text = "3"
+				host.FrameInput.Text = scenario.input
 			}
 			shirei.RunFrameFn(rootView)
 			if handled != scenario.wantHandled {
@@ -65,6 +227,68 @@ func TestEditorKeyboardBindings(t *testing.T) {
 				t.Errorf("document = %q, want %q", mainEditor.Text, scenario.wantText)
 			}
 		})
+	}
+}
+
+func TestEditorShortcutLoggingWorkflow(t *testing.T) {
+	shirei.InitFontSubsystem()
+	originalEditor := mainEditor
+	t.Cleanup(func() {
+		mainEditor = originalEditor
+		shirei.ResetInputSession()
+	})
+	for _, key := range []shirei.KeyCode{shirei.Key2, shirei.KeyE, shirei.Key3, shirei.Key4, shirei.KeyK} {
+		for _, scenario := range []struct {
+			name   string
+			anchor int
+			cursor int
+			want   string
+		}{
+			{"caret", 8, 8, "Line 2: second\n"},
+			{"selection", 7, 10, "Line 2: eco\n"},
+		} {
+			t.Run(fmt.Sprint(key)+"/"+scenario.name, func(t *testing.T) {
+				mainEditor = NewEditor("first\nsecond", originalEditor.Config)
+				mainEditor.Bindings[shirei.Combo(shirei.Key1, shirei.ModCmd)] = func(string, widgets.TextInputState) {
+					widgets.EditorSetSelection(shirei.CurrentId(), scenario.anchor, scenario.cursor)
+				}
+				scope := new(int)
+				frameView := func() {
+					shirei.ContainerWithKey(scope, shirei.Attrs(shirei.Viewport), rootView)
+				}
+				shirei.ResetInputSession()
+				shirei.GetHost().WindowSize = shirei.Vec2{windowWidth, windowHeight}
+				for frame := 0; frame < 3; frame++ {
+					shirei.RunFrameFn(frameView)
+				}
+				host := shirei.GetHost()
+				host.Input.Modifiers = shirei.ModCmd
+				host.FrameInput = shirei.FrameInputData{Key: shirei.Key1}
+				shirei.RunFrameFn(frameView)
+				reader, writer, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+				defer writer.Close()
+				originalStdout := os.Stdout
+				defer func() { os.Stdout = originalStdout }()
+				os.Stdout = writer
+				host.FrameInput = shirei.FrameInputData{Key: key}
+				shirei.RunFrameFn(frameView)
+				os.Stdout = originalStdout
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				output, err := io.ReadAll(reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(output) != scenario.want {
+					t.Errorf("output = %q, want %q", output, scenario.want)
+				}
+			})
+		}
 	}
 }
 
@@ -108,7 +332,8 @@ func TestEditorMarkerWorkflow(t *testing.T) {
 		mainEditor = originalEditor
 		shirei.ResetInputSession()
 	})
-	mainEditor = NewMelroseEditor("first\nsecond", originalEditor.Config)
+	mainEditor = NewEditor("first\nsecond", originalEditor.Config)
+	mainEditor.Bindings[shirei.Combo(shirei.Key4, shirei.ModCmd)] = mainEditor.markLine
 	scope := new(int)
 	frameView := func() {
 		shirei.ContainerWithKey(scope, shirei.Attrs(shirei.Viewport), rootView)
@@ -163,7 +388,7 @@ func TestEditorHighlightWorkflow(t *testing.T) {
 		{"blank line", 6, 6, 6, 6},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			mainEditor = NewMelroseEditor("first\n\nsecond", Config{FlashDuration: 500 * time.Millisecond})
+			mainEditor = NewEditor("first\n\nsecond", &Config{EditorFlashDuration: 500 * time.Millisecond})
 			mainEditor.Bindings = map[shirei.KeyCombo]func(string, widgets.TextInputState){
 				shirei.Combo(shirei.Key3, shirei.ModCmd): mainEditor.printSelection,
 				shirei.Combo(shirei.Key2, shirei.ModCmd): func(string, widgets.TextInputState) {
@@ -186,7 +411,7 @@ func TestEditorHighlightWorkflow(t *testing.T) {
 			host.FrameInput = shirei.FrameInputData{Key: shirei.Key3}
 			started := time.Now()
 			shirei.RunFrameFn(frameView)
-			if mainEditor.flash.until.Before(started.Add(mainEditor.Config.FlashDuration)) || mainEditor.flash.until.After(time.Now().Add(mainEditor.Config.FlashDuration)) {
+			if mainEditor.flash.until.Before(started.Add(mainEditor.Config.EditorFlashDuration)) || mainEditor.flash.until.After(time.Now().Add(mainEditor.Config.EditorFlashDuration)) {
 				t.Error("flash deadline does not use the configured duration")
 			}
 			if mainEditor.flash.start != scenario.wantStart || mainEditor.flash.end != scenario.wantEnd {
